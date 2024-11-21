@@ -10,14 +10,22 @@ import geopandas as gpd
 # Load data
 @st.cache_data
 def load_data():
-    listings_data = pd.read_csv("listings.csv.gz", compression='gzip')
-    calendar_data = pd.read_csv("calendar.csv.gz", compression='gzip')
-    neighborhoods_data = pd.read_csv("neighbourhoods.csv")
-    neighborhoods_geo = gpd.read_file("neighbourhoods.geojson")
+    try:
+        listings_data = pd.read_csv("listings.csv.gz", compression='gzip')
+        calendar_data = pd.read_csv("calendar.csv.gz", compression='gzip')
+        neighborhoods_data = pd.read_csv("neighbourhoods.csv")
+        neighborhoods_geo = gpd.read_file("neighbourhoods.geojson")
+    except FileNotFoundError as e:
+        st.error(f"Error loading files: {e}. Please ensure all required files are in the directory.")
+        st.stop()
 
     # Clean and preprocess the data
     listings_data['price'] = listings_data['price'].replace('[\\$,]', '', regex=True).astype(float)
     calendar_data['available'] = calendar_data['available'].replace({'t': True, 'f': False})
+
+    # Handle missing values
+    listings_data['neighbourhood'] = listings_data['neighbourhood'].fillna("Unknown")
+    listings_data = listings_data.dropna(subset=['price', 'latitude', 'longitude'])
 
     return listings_data, calendar_data, neighborhoods_data, neighborhoods_geo
 
@@ -29,78 +37,88 @@ st.sidebar.header("Filter Listings")
 min_price, max_price = st.sidebar.slider("Select price range", int(listings_data.price.min()),
                                          int(listings_data.price.max()), (50, 500))
 availability = st.sidebar.slider("Select availability (days)", 0, 365, (0, 365))
-neighborhood = st.sidebar.selectbox("Select Neighborhood", options=listings_data['neighbourhood'].unique())
+neighborhood = st.sidebar.selectbox("Select Neighborhood", options=sorted(listings_data['neighbourhood'].unique()))
 
 # Filter data based on user input
-filtered_data = listings_data[(listings_data['price'] >= min_price) &
-                              (listings_data['price'] <= max_price) &
-                              (listings_data['availability_365'] >= availability[0]) &
-                              (listings_data['availability_365'] <= availability[1]) &
-                              (listings_data['neighbourhood'] == neighborhood)]
+filtered_data = listings_data[
+    (listings_data['price'] >= min_price) &
+    (listings_data['price'] <= max_price) &
+    (listings_data['availability_365'] >= availability[0]) &
+    (listings_data['availability_365'] <= availability[1]) &
+    (listings_data['neighbourhood'] == neighborhood)
+    ]
 
-# Title and description
-st.title("Boston Airbnb Market Insights")
-st.write("Explore trends in pricing, availability, and location for Airbnb listings in Boston.")
+# Warn if no data matches the filter
+if filtered_data.empty:
+    st.warning("No listings match your criteria. Please adjust the filters.")
+else:
+    # Title and description
+    st.title("Boston Airbnb Market Insights")
+    st.write("Explore trends in pricing, availability, and location for Airbnb listings in Boston.")
 
-# Visualization 1: Price Distribution Histogram
-st.subheader("Price Distribution")
-fig, ax = plt.subplots()
-ax.hist(filtered_data['price'], bins=20, color='skyblue', edgecolor='black')
-ax.set_xlabel("Price")
-ax.set_ylabel("Frequency")
-st.pyplot(fig)
+    # Visualization 1: Price Distribution Histogram
+    st.subheader("Price Distribution")
+    fig, ax = plt.subplots()
+    ax.hist(filtered_data['price'], bins=20, color='skyblue', edgecolor='black')
+    ax.set_xlabel("Price")
+    ax.set_ylabel("Frequency")
+    st.pyplot(fig)
 
-# Visualization 2: Average Price by Neighborhood Bar Chart
-st.subheader("Average Price by Neighborhood")
-neighborhood_avg_price = listings_data.groupby('neighbourhood')['price'].mean().sort_values(ascending=False)
-fig, ax = plt.subplots(figsize=(10, 6))  # Adjusted the size for better visibility
-neighborhood_avg_price.plot(kind='bar', ax=ax, color='coral')
-ax.set_ylabel("Average Price")
-ax.set_xlabel("Neighborhood")
-ax.set_title("Average Price by Neighborhood")
-ax.tick_params(axis='x', rotation=45)  # Rotate x-axis labels for readability
+    # Visualization 2: Average Price by Neighborhood Bar Chart
+    st.subheader("Average Price by Neighborhood")
+    neighborhood_avg_price = listings_data.groupby('neighbourhood')['price'].mean().sort_values(ascending=False)
+    fig, ax = plt.subplots(figsize=(10, 6))  # Adjusted the size for better visibility
+    neighborhood_avg_price.plot(kind='bar', ax=ax, color='coral')
+    ax.set_ylabel("Average Price")
+    ax.set_xlabel("Neighborhood")
+    ax.set_title("Average Price by Neighborhood")
+    ax.tick_params(axis='x', rotation=45)  # Rotate x-axis labels for readability
+    st.pyplot(fig)
 
-st.pyplot(fig)
+    # Visualization 3: Seasonal Availability Trend
+    st.subheader("Seasonal Availability Trend")
+    # Assuming 'date' column exists and in a format like 'YYYY-MM-DD'
+    calendar_data['date'] = pd.to_datetime(calendar_data['date'], errors='coerce')
+    calendar_data['month'] = calendar_data['date'].dt.month
+    availability_by_month = calendar_data.groupby('month')['available'].mean()
+    fig, ax = plt.subplots()
+    availability_by_month.plot(kind='line', ax=ax, marker='o', color='green')
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Average Availability")
+    st.pyplot(fig)
 
-
-# Visualization 3: Seasonal Availability Trend
-st.subheader("Seasonal Availability Trend")
-# Assuming 'date' column exists and in a format like 'YYYY-MM-DD'
-calendar_data['month'] = pd.to_datetime(calendar_data['date']).dt.month
-availability_by_month = calendar_data.groupby('month')['available'].mean()
-fig, ax = plt.subplots()
-availability_by_month.plot(kind='line', ax=ax, marker='o', color='green')
-ax.set_xlabel("Month")
-ax.set_ylabel("Average Availability")
-st.pyplot(fig)
-
-# Visualization 4: Interactive Map with PyDeck
-st.subheader("Map of Airbnb Listings in Boston")
-map_data = filtered_data[['latitude', 'longitude', 'price']]
-st.pydeck_chart(pdk.Deck(
-    map_style="mapbox://styles/mapbox/light-v9",
-    initial_view_state=pdk.ViewState(
-        latitude=42.3601,
-        longitude=-71.0589,
-        zoom=11,
-        pitch=50,
-    ),
-    layers=[
-        pdk.Layer(
-            "ScatterplotLayer",
-            data=map_data,
-            get_position='[longitude, latitude]',
-            get_color='[200, 30, 0, 160]',
-            get_radius=200,
-            pickable=True
+    # Visualization 4: Interactive Map with PyDeck
+    st.subheader("Map of Airbnb Listings in Boston")
+    map_data = filtered_data[['latitude', 'longitude', 'price']]
+    tooltip = {
+        "html": "<b>Price:</b> {price}",
+        "style": {"color": "white"}
+    }
+    st.pydeck_chart(pdk.Deck(
+        map_style="mapbox://styles/mapbox/light-v9",
+        initial_view_state=pdk.ViewState(
+            latitude=42.3601,
+            longitude=-71.0589,
+            zoom=11,
+            pitch=50,
         ),
-    ],
-))
+        layers=[
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=map_data,
+                get_position='[longitude, latitude]',
+                get_color='[200, 30, 0, 160]',
+                get_radius=200,
+                pickable=True,
+            )
+        ],
+        tooltip=tooltip
+    ))
 
-# Additional Insights
-st.subheader("Additional Insights")
-st.write(f"Total listings in selected range: {filtered_data.shape[0]}")
-st.write(filtered_data.describe())
+    # Additional Insights
+    st.subheader("Additional Insights")
+    st.write(f"Total listings in selected range: {filtered_data.shape[0]}")
+    st.write(filtered_data.describe())
 
 # Documentation String
 """
